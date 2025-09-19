@@ -193,12 +193,33 @@ class ParallelConfig:
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
 
+<<<<<<< HEAD
     per_stage_tp_sizes: Optional[list[int]] = None
     """List of TP sizes for each PP stage. If None, uses uniform 
     tensor_parallel_size.
     Example: [4, 1, 2, 1] means stage 0 has TP=4, stage 1 has TP=1, etc.
     Must have length equal to pipeline_parallel_size.
     Enables heterogeneous TP+PP configurations for mixed GPU setups."""
+=======
+    _api_process_count: int = 1
+    """
+    The number of API processes initialized.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+
+    _api_process_rank: int = 0
+    """
+    The rank of this API process, or `-1` for engine core processes
+    under API server scale-out.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+>>>>>>> 6c117cff7 ([Frontend] Pass API server count to each process (#23717))
 
     @property
     def world_size_across_dp(self) -> int:
@@ -477,6 +498,12 @@ class ParallelConfig:
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
+
+        if not -1 <= self._api_process_rank < self._api_process_count:
+            raise ValueError(
+                "Invalid value of `_api_process_rank`. "
+                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
+                f"but found: {self._api_process_rank}")
 
     @property
     def use_ray(self) -> bool:
