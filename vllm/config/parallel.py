@@ -175,6 +175,13 @@ class ParallelConfig:
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
 
+    per_stage_tp_sizes: Optional[list[int]] = None
+    """List of TP sizes for each PP stage. If None, uses uniform 
+    tensor_parallel_size.
+    Example: [4, 1, 2, 1] means stage 0 has TP=4, stage 1 has TP=1, etc.
+    Must have length equal to pipeline_parallel_size.
+    Enables heterogeneous TP+PP configurations for mixed GPU setups."""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
@@ -197,6 +204,27 @@ class ParallelConfig:
             self.data_parallel_master_port += 1
 
         return answer
+
+    def get_tp_size_for_stage(self, pp_rank: int) -> int:
+        """Get TP size for a specific PP stage.
+        
+        Args:
+            pp_rank: Pipeline parallel rank (stage number)
+            
+        Returns:
+            TP size for the specified stage
+        """
+        if self.per_stage_tp_sizes is None:
+            return self.tensor_parallel_size
+        return self.per_stage_tp_sizes[pp_rank]
+
+    def is_heterogeneous(self) -> bool:
+        """Check if using heterogeneous TP configuration.
+        
+        Returns:
+            True if per_stage_tp_sizes is configured, False otherwise
+        """
+        return self.per_stage_tp_sizes is not None
 
     def stateless_init_dp_group(self) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
@@ -276,6 +304,8 @@ class ParallelConfig:
         factors.append(self.enable_expert_parallel)
         factors.append(self.data_parallel_size)
         factors.append(envs.VLLM_ALL2ALL_BACKEND)
+        # Include heterogeneous TP config in hash
+        factors.append(self.per_stage_tp_sizes)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
@@ -310,9 +340,29 @@ class ParallelConfig:
                 "in v0.12.0. Changing this field after initialization will "
                 "have no effect.")
 
-        # Continue with the rest of the initialization
-        self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size
+        # Validate heterogeneous TP configuration
+        if self.per_stage_tp_sizes is not None:
+            # Check length matches pipeline parallel size
+            if len(self.per_stage_tp_sizes) != self.pipeline_parallel_size:
+                raise ValueError(f"per_stage_tp_sizes length "
+                                 f"({len(self.per_stage_tp_sizes)}) "
+                                 f"must equal pipeline_parallel_size "
+                                 f"({self.pipeline_parallel_size})")
+
+            # Check all values are positive
+            if any(tp_size <= 0 for tp_size in self.per_stage_tp_sizes):
+                raise ValueError(
+                    f"All values in per_stage_tp_sizes must be positive "
+                    f"integers, but got {self.per_stage_tp_sizes}")
+
+            # Calculate world_size as sum of per-stage TP sizes
+            self.world_size = sum(self.per_stage_tp_sizes)
+
+            logger.info("Using heterogeneous TP configuration")
+        else:
+            # Continue with the rest of the initialization
+            self.world_size = self.pipeline_parallel_size * \
+                self.tensor_parallel_size
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
