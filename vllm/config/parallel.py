@@ -228,6 +228,13 @@ class ParallelConfig:
     """
 >>>>>>> 6c117cff7 ([Frontend] Pass API server count to each process (#23717))
 
+    per_stage_tp_sizes: Optional[list[int]] = None
+    """List of TP sizes for each PP stage. If None, uses uniform 
+    tensor_parallel_size.
+    Example: [4, 1, 2, 1] means stage 0 has TP=4, stage 1 has TP=1, etc.
+    Must have length equal to pipeline_parallel_size.
+    Enables heterogeneous TP+PP configurations for mixed GPU setups."""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
