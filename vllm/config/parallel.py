@@ -200,14 +200,6 @@ class ParallelConfig:
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
 
-<<<<<<< HEAD
-    per_stage_tp_sizes: Optional[list[int]] = None
-    """List of TP sizes for each PP stage. If None, uses uniform 
-    tensor_parallel_size.
-    Example: [4, 1, 2, 1] means stage 0 has TP=4, stage 1 has TP=1, etc.
-    Must have length equal to pipeline_parallel_size.
-    Enables heterogeneous TP+PP configurations for mixed GPU setups."""
-=======
     _api_process_count: int = 1
     """
     The number of API processes initialized.
@@ -226,7 +218,6 @@ class ParallelConfig:
         This is an internal config that is only valid for and
         should only be set by API server scale-out.
     """
->>>>>>> 6c117cff7 ([Frontend] Pass API server count to each process (#23717))
 
     per_stage_tp_sizes: Optional[list[int]] = None
     """List of TP sizes for each PP stage. If None, uses uniform 
