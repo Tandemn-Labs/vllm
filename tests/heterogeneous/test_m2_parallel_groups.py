@@ -111,11 +111,25 @@ def test_group_creation():
     # Test PP group
     pp_group = get_pp_group()
     assert pp_group is not None, "PP group should be initialized"
-    expected_pp_size = pipeline_parallel_size
-    assert pp_group.world_size == expected_pp_size, \
-        f"PP group size mismatch: {pp_group.world_size} vs {expected_pp_size}"
-
-    print(f"✅ Rank {rank}: PP group verified (ranks={pp_group.ranks})")
+    # For heterogeneous mode, verify correct PP group assignment
+    if rank == 1:
+        # Rank 1 should be in dummy single-rank PP group
+        assert pp_group.world_size == 1, \
+            f"""Rank 1 should be in dummy PP group (size=1),
+             got {pp_group.world_size}"""
+        assert pp_group.ranks == [1], \
+            f"Rank 1 PP group should be [1], got {pp_group.ranks}"
+        print(
+            f"✅ Rank {rank}: Dummy PP group verified (ranks={pp_group.ranks})")
+    else:
+        # Ranks 0, 2, 3 should be in main PP group
+        assert pp_group.world_size == pipeline_parallel_size, \
+            f"""Main PP group size mismatch: 
+            {pp_group.world_size} vs {pipeline_parallel_size}"""
+        assert set(pp_group.ranks) == {0, 2, 3}, \
+            f"Main PP group should be [0, 2, 3], got {pp_group.ranks}"
+        print(
+            f"✅ Rank {rank}: Main PP group verified (ranks={pp_group.ranks})")
 
     # Synchronize all ranks
     dist.barrier()
