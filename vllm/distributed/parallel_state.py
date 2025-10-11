@@ -1212,22 +1212,225 @@ def initialize_model_parallel(
         _EP.rank_in_group)
 
 
+def initialize_model_parallel_heterogeneous(
+    per_stage_tp_sizes: list[int],
+    pipeline_model_parallel_size: int,
+    backend: Optional[str] = None,
+) -> None:
+    """Initialize model parallel groups with
+    heterogeneous TP sizes per stage.
+    
+    This function creates process groups for
+    heterogeneous tensor parallelism (Heterogeneous TP+PP)
+    where different pipeline stages can have different TP sizes.
+    
+    Args:
+        per_stage_tp_sizes: List of TP sizes for each pipeline stage.
+            Example: [4, 1, 2, 1] means stage 0
+            (first pipeline stage) has TP=4, stage 1
+            (second pipeline stage) has TP=1, etc.
+        pipeline_model_parallel_size: Number of pipeline stages.
+        backend: PyTorch distributed backend to use.
+        
+    Example:
+        For per_stage_tp_sizes=[4, 1, 2, 1] with 8 GPUs:
+        - Ranks 0-3: Stage 0 (TP=4)
+        - Rank 4: Stage 1 (TP=1) 
+        - Ranks 5-6: Stage 2 (TP=2)
+        - Rank 7: Stage 3 (TP=1)
+    """
+    # Import heterogeneous module
+    from vllm.distributed.heterogeneous_parallel import (
+        get_heterogeneous_pp_groups, set_heterogeneous_config)
+
+    # Get world size and rank
+    assert torch.distributed.is_initialized()
+    world_size: int = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
+    local_rank = get_world_group(
+    ).local_rank  # to find where i am currently running
+    backend = backend or torch.distributed.get_backend(
+        get_world_group().device_group)  # currently homogenous
+    # (as process group cannot be different on different nodes)
+
+    # Validate configuration
+    assert len(per_stage_tp_sizes) == pipeline_model_parallel_size, (
+        f"per_stage_tp_sizes length ({len(per_stage_tp_sizes)}) must equal "
+        f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
+
+    total_gpus = sum(per_stage_tp_sizes)
+    # total number of gpus in the system
+    assert total_gpus == world_size, (
+        f"Sum of per_stage_tp_sizes ({total_gpus}) must equal "
+        f"world_size ({world_size})")
+
+    # Build rank to stage mapping
+    rank_to_stage_info = {}
+    gpu_offset = 0
+    for stage_idx, tp_size in enumerate(per_stage_tp_sizes):
+        for tp_rank in range(tp_size):
+            gpu_id = gpu_offset + tp_rank
+            rank_to_stage_info[gpu_id] = {
+                'stage': stage_idx,
+                'tp_size': tp_size,
+                'tp_rank': tp_rank,
+            }
+        gpu_offset += tp_size
+    # Store heterogeneous configuration
+    hetero_config = {
+        'per_stage_tp_sizes': per_stage_tp_sizes,
+        'rank_to_stage_info': rank_to_stage_info,
+        'pipeline_parallel_size': pipeline_model_parallel_size,
+    }
+    set_heterogeneous_config(hetero_config)
+    # this sets the _HETERO_CONFIG global variable
+    # For a dummy case of per_stage_tp_sizes=[4, 1, 2, 1], this will create:
+    # rank_to_stage_info = {
+    #     0: {'stage': 0, 'tp_size': 4, 'tp_rank': 0},  # Stage 0, TP rank 0
+    #     1: {'stage': 0, 'tp_size': 4, 'tp_rank': 1},  # Stage 0, TP rank 1
+    #     2: {'stage': 0, 'tp_size': 4, 'tp_rank': 2},  # Stage 0, TP rank 2
+    #     3: {'stage': 0, 'tp_size': 4, 'tp_rank': 3},  # Stage 0, TP rank 3
+    #     4: {'stage': 1, 'tp_size': 1, 'tp_rank': 0},  # Stage 1, TP rank 0
+    #     5: {'stage': 2, 'tp_size': 2, 'tp_rank': 0},  # Stage 2, TP rank 0
+    #     6: {'stage': 2, 'tp_size': 2, 'tp_rank': 1},  # Stage 2, TP rank 1
+    #     7: {'stage': 3, 'tp_size': 1, 'tp_rank': 0},  # Stage 3, TP rank 0
+    # }
+
+    # Build TP groups (per-stage)
+    global _TP
+    assert _TP is None, "tensor model parallel group is already initialized"
+
+    tp_group_ranks = []
+    gpu_offset = 0
+    for stage_idx, tp_size in enumerate(per_stage_tp_sizes):
+        stage_ranks = list(range(gpu_offset, gpu_offset + tp_size))
+        tp_group_ranks.append(stage_ranks)
+        gpu_offset += tp_size
+
+    # Creating all tp groups at once
+    _TP = init_model_parallel_group(tp_group_ranks,
+                                    local_rank,
+                                    backend,
+                                    use_message_queue_broadcaster=True,
+                                    group_name="tp")
+
+    # For per_stage_tp_sizes=[4, 1, 2, 1], this will create:
+    # Stage 0 (TP=4): TP group [0, 1, 2, 3] - ranks 0,1,2,3 get this group
+    # Stage 1 (TP=1): TP group [4] - rank 4 gets this single-rank group
+    # Stage 2 (TP=2): TP group [5, 6] - ranks 5,6 get this group
+    # Stage 3 (TP=1): TP group [7] - rank 7 gets this single-rank group
+
+    # Build PP groups
+    global _PP
+    assert _PP is None, "pipeline model parallel group is already initialized"
+
+    # Get the PP group configuration using the helper function
+    # This implements our approach:
+    #  Only TP rank 0 from each stage participates in PP
+    # Other ranks get dummy single-rank groups for API compatibility
+    pp_config = get_heterogeneous_pp_groups()
+
+    # Build pp_group_ranks_list from the configuration
+    pp_group_ranks_list = []
+    pp_group_ranks_list.append(
+        pp_config['main'])  # Add main PP group [0,4,5,7]
+    pp_group_ranks_list.extend(
+        pp_config['dummy'])  # Add all dummy groups [[1], [2], [3], [6]]
+
+    # For [4,1,2,1], pp_group_ranks_list = [[0,4,5,7], [1], [2], [3], [6]]
+
+    # Create the PP groups
+    _PP = init_model_parallel_group(pp_group_ranks_list,
+                                    local_rank,
+                                    backend,
+                                    group_name="pp")
+    # TODO(Hetarth): Currently in eheterogeneous mode,
+    #  DCP is not supported along with DP and EP
+    # # Initialize DCP (decode context parallel) - use dummy groups
+    # global _DCP
+    # assert _DCP is None, (
+    #     "decode context model parallel group is already initialized")
+
+    # # For heterogeneous mode, create single-rank DCP groups for simplicity
+    # dcp_groups = [[r] for r in range(world_size)]
+    # _DCP = init_model_parallel_group(
+    #     dcp_groups,
+    #     local_rank,
+    #     backend,
+    #     use_message_queue_broadcaster=True,
+    #     group_name="dcp"
+    # )
+
+    # # Initialize DP (data parallel)
+    #  - currently not supported with heterogeneous
+    # global _DP
+    # assert _DP is None, "data parallel group is already initialized"
+
+    # # Create single-rank DP groups for API compatibility
+    # dp_groups = [[r] for r in range(world_size)]
+    # _DP = init_model_parallel_group(
+    #     dp_groups,
+    #     local_rank,
+    #     backend,
+    #     group_name="dp"
+    # )
+
+    # # Initialize EP (expert parallel)
+    #  - currently not supported with heterogeneous
+    # global _EP
+    # assert _EP is None, "expert parallel group is already initialized"
+
+    # # Create single-rank EP groups for API compatibility
+    # ep_groups = [[r] for r in range(world_size)]
+    # _EP = init_model_parallel_group(
+    #     ep_groups,
+    #     local_rank,
+    #     backend,
+    #     group_name="ep"
+    # )
+
+    # Log the configuration
+    stage_info = rank_to_stage_info[rank]
+    logger.info(
+        "Heterogeneous parallel: rank %s is assigned as "
+        "stage %s with TP size %s, TP rank %s, PP group %s", rank,
+        stage_info['stage'], stage_info['tp_size'], stage_info['tp_rank'],
+        _PP.ranks)
+
+
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
     pipeline_model_parallel_size: int,
     decode_context_model_parallel_size: Optional[int] = 1,
     backend: Optional[str] = None,
+    per_stage_tp_sizes: Optional[list[int]] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
+    
+    Args:
+        tensor_model_parallel_size: Uniform TP size (
+        ignored if per_stage_tp_sizes is set).
+        pipeline_model_parallel_size: Number of pipeline stages.
+        decode_context_model_parallel_size: DCP size.
+        backend: PyTorch distributed backend.
+        per_stage_tp_sizes: List of TP sizes per stage for heterogeneous mode.
     """
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
+
     if not model_parallel_is_initialized():
-        initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size,
-                                  decode_context_model_parallel_size, backend)
+        if per_stage_tp_sizes is not None:
+            # Heterogeneous mode
+            initialize_model_parallel_heterogeneous(
+                per_stage_tp_sizes, pipeline_model_parallel_size, backend)
+        else:
+            # Standard uniform mode
+            initialize_model_parallel(tensor_model_parallel_size,
+                                      pipeline_model_parallel_size,
+                                      decode_context_model_parallel_size,
+                                      backend)
         return
 
     assert (
@@ -1321,6 +1524,12 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    # Reset heterogeneous configuration if it exists
+    from vllm.distributed.heterogeneous_parallel import (
+        is_heterogeneous_mode, reset_heterogeneous_config)
+    if is_heterogeneous_mode():
+        reset_heterogeneous_config()
+
     global _TP
 
     if _TP:
