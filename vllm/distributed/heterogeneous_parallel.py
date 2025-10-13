@@ -239,13 +239,13 @@ def is_cross_backend_edge() -> bool:
         # naively assume cross-backend edge when TP sizes differ
         next_tp = get_next_stage_tp_size()
         prev_tp = get_prev_stage_tp_size()
-        current_tp = info['tp_size']
+        # current_tp = info['tp_size']
 
         stage_backends = get_or_detect_stage_backends()
         current_stage = info['stage']
         current_backend = stage_backends.get(current_stage)
 
-        if next_tp is not None and next_tp != current_tp:
+        if next_tp is not None:
             # Check next stage backend
             next_stage = current_stage + 1
             if next_stage in stage_backends:
@@ -253,7 +253,7 @@ def is_cross_backend_edge() -> bool:
                 if current_backend != next_backend:
                     return True
 
-        if prev_tp is not None and prev_tp != current_tp:
+        if prev_tp is not None:
             # Check previous stage backend
             prev_stage = current_stage - 1
             if prev_stage in stage_backends:
