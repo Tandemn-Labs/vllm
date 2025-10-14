@@ -174,6 +174,100 @@ def is_pp_primary_rank() -> bool:
     return info['tp_rank'] == 0
 
 
+def get_next_stage_pp_rank_0() -> Optional[int]:
+    """Get the global rank of the next pipeline stage's TP rank 0.
+    
+    Returns:
+        Global rank of next stage's TP rank 0,
+         or None if this is the last stage.
+        
+    Note:
+        In heterogeneous mode, only TP rank 0 from each stage participates
+        in the main PP group, so this returns the rank that would receive
+        data in a pipeline transfer.
+    """
+    if not is_heterogeneous_mode():
+        return None
+
+    # Get current stage info
+    current_stage_info = get_current_stage_info()
+    current_stage = current_stage_info['stage']
+
+    # Get PP groups configuration
+    pp_groups = get_heterogeneous_pp_groups()
+    pp_groups_main = pp_groups['main']  # e.g., [0, 4, 5, 7]
+
+    # Find next stage index
+    next_stage_idx = current_stage + 1
+
+    # Check if next stage exists
+    if next_stage_idx < len(pp_groups_main):
+        return pp_groups_main[next_stage_idx]
+
+    # This is the last stage
+    return None
+
+
+def get_prev_stage_pp_rank_0() -> Optional[int]:
+    """Get the global rank of the previous pipeline stage's TP rank 0.
+    
+    Returns:
+        Global rank of previous stage's TP rank 0,
+         or None if this is the first stage.
+        
+    Note:
+        In heterogeneous mode, only TP rank 0 from each stage participates
+        in the main PP group, so this returns the rank that would send
+        data in a pipeline transfer.
+    """
+    if not is_heterogeneous_mode():
+        return None
+
+    # Get current stage info
+    current_stage_info = get_current_stage_info()
+    current_stage = current_stage_info['stage']
+
+    # Get PP groups configuration
+    pp_groups = get_heterogeneous_pp_groups()
+    pp_groups_main = pp_groups['main']  # e.g., [0, 4, 5, 7]
+
+    # Find previous stage index
+    prev_stage_idx = current_stage - 1
+
+    # Check if previous stage exists
+    if prev_stage_idx >= 0:
+        return pp_groups_main[prev_stage_idx]
+
+    # This is the first stage
+    return None
+
+
+def get_stage_pp_rank_0(stage_idx: int) -> Optional[int]:
+    """Get the global rank of a specific pipeline stage's TP rank 0.
+    
+    Args:
+        stage_idx: Pipeline stage index (0-based).
+        
+    Returns:
+        Global rank of the stage's TP rank 0, or None if stage doesn't exist.
+        
+    Note:
+        This is a general helper that can get any stage's primary PP rank.
+    """
+    if not is_heterogeneous_mode():
+        return None
+
+    # Get PP groups configuration
+    pp_groups = get_heterogeneous_pp_groups()
+    pp_groups_main = pp_groups['main']  # e.g., [0, 4, 5, 7]
+
+    # Check if stage exists
+    if 0 <= stage_idx < len(pp_groups_main):
+        return pp_groups_main[stage_idx]
+
+    return None
+
+
 def reset_heterogeneous_config() -> None:
     """Reset the heterogeneous configuration.
     
