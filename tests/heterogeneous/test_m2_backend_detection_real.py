@@ -47,6 +47,10 @@ def test_backend_detection():
         raise RuntimeError(
             f"This test requires exactly 4 processes, got {world_size}")
 
+    # ADD THIS LINE: Set CUDA device for this rank
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
     # Initialize distributed environment
     init_distributed_environment(
         world_size=world_size,
