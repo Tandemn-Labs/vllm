@@ -719,56 +719,57 @@ class GroupCoordinator:
             # get TP Group
             tp_group = get_tp_group()
             current_tp_rank = tp_group.rank_in_group
-            if current_tp_rank == 0:
-                # gather tensors to only zeroth rank
-                gathered_dict = {}
-                for key, value in tensor_dict.items():
-                    if isinstance(value, torch.Tensor) and value.numel(
-                    ) > 0:  # only if they are non zero
-                        # gather the tensor to the zeroth rank
-                        gathered_value = tp_group.gather(
-                            value, dst=0, dim=-1
-                        )  # reconsutruct the sharded HIDDEN STATE hence dim=-1
-                        # the ranks usually have
-                        # [Batch Size, Sequence Length, Hidden Size//rank]
-                        if gathered_value is not None:
-                            gathered_dict[key] = gathered_value
-                    else:
-                        gathered_dict[
-                            key] = value  # if they are zero, use as is
 
-                # Get next stage's TP rank 0 using the helper function
-                from vllm.distributed.heterogeneous_parallel import (
-                    get_next_stage_pp_rank_0)
-                next_stage_rank_0 = get_next_stage_pp_rank_0()
+            # All TP ranks must participate in the gather collective
+            gathered_dict = {}
+            for key, value in tensor_dict.items():
+                if isinstance(value, torch.Tensor) and value.numel() > 0:
+                    # All ranks call gather; only dst=0 receives the result
+                    gathered_value = tp_group.gather(value, dst=0, dim=-1)
+                    # Only rank 0 gets non-None gathered_value
+                    # reconsutruct the sharded HIDDEN STATE hence dim=-1
+                    # the ranks usually have
+                    # [Batch Size, Sequence Length, Hidden Size//rank]
+                    if current_tp_rank == 0 and gathered_value is not None:
+                        gathered_dict[key] = gathered_value
+                else:
+                    if current_tp_rank == 0:
+                        gathered_dict[key] = value
 
-                if next_stage_rank_0 is not None:
-                    # Convert global rank to local rank in PP group
-                    pp_group = get_pp_group()
-                    dst_local = pp_group.ranks.index(next_stage_rank_0)
-
-                    # Send using CPU hop if cross-backend
-                    if self._is_cross_backend_edge():
-                        # Use CPU group for cross-backend
-                        # Split and send via CPU
-                        metadata_list, tensor_list = _split_tensor_dict(
-                            gathered_dict)
-                        self.send_object(metadata_list, dst=dst_local)
-
-                        for tensor in tensor_list:
-                            if tensor.numel() > 0:
-                                # Move to CPU if needed
-                                cpu_tensor = tensor.cpu(
-                                ) if not tensor.is_cpu else tensor
-                                torch.distributed.send(
-                                    cpu_tensor,
-                                    dst=pp_group.ranks[dst_local],
-                                    group=self.cpu_group)
-                    else:
-                        # Same backend - use normal send
-                        self.send_tensor_dict(gathered_dict, dst=dst_local)
-            else:
+            # Only TP rank 0 sends to the next stage
+            if current_tp_rank != 0:
                 return None
+
+            # Get next stage's TP rank 0 using the helper function
+            from vllm.distributed.heterogeneous_parallel import (
+                get_next_stage_pp_rank_0)
+            next_stage_rank_0 = get_next_stage_pp_rank_0()
+
+            if next_stage_rank_0 is not None:
+                # Convert global rank to local rank in PP group
+                pp_group = get_pp_group()
+                dst_local = pp_group.ranks.index(next_stage_rank_0)
+
+                # Send using CPU hop if cross-backend
+                if self._is_cross_backend_edge():
+                    # Use CPU group for cross-backend
+                    # Split and send via CPU
+                    metadata_list, tensor_list = _split_tensor_dict(
+                        gathered_dict)
+                    self.send_object(metadata_list, dst=dst_local)
+
+                    for tensor in tensor_list:
+                        if tensor.numel() > 0:
+                            # Move to CPU if needed
+                            cpu_tensor = tensor.cpu(
+                            ) if not tensor.is_cpu else tensor
+                            torch.distributed.send(
+                                cpu_tensor,
+                                dst=pp_group.ranks[dst_local],
+                                group=self.cpu_group)
+                else:
+                    # Same backend - use normal send
+                    self.send_tensor_dict(gathered_dict, dst=dst_local)
         # case 2 - When current TP = 1 and next stage has TP > 1
         elif current_tp_size == 1 and next_stage_tp_size > 1:
             # TODO(Hetarth): Implement send-broadcast pattern
@@ -813,46 +814,52 @@ class GroupCoordinator:
             tp_group = get_tp_group()
             current_tp_rank = tp_group.rank_in_group
 
-            if current_tp_rank == 0:
-                # Gather tensors to rank 0 of current stage
-                gathered_dict = {}
-                for key, value in tensor_dict.items():
-                    if isinstance(value, torch.Tensor) and value.numel() > 0:
-                        gathered_value = tp_group.gather(value, dst=0, dim=0)
-                        if gathered_value is not None:
-                            gathered_dict[key] = gathered_value
-                    else:
+            # All TP ranks must participate in the gather collective
+            gathered_dict = {}
+            for key, value in tensor_dict.items():
+                if isinstance(value, torch.Tensor) and value.numel() > 0:
+                    # All ranks call gather; only dst=0 receives the result
+                    gathered_value = tp_group.gather(value, dst=0, dim=0)
+                    # Only rank 0 gets non-None gathered_value
+                    if current_tp_rank == 0 and gathered_value is not None:
+                        gathered_dict[key] = gathered_value
+                else:
+                    if current_tp_rank == 0:
                         gathered_dict[key] = value
 
-                # Get next stage's rank 0
-                from vllm.distributed.heterogeneous_parallel import (
-                    get_next_stage_pp_rank_0)
-                next_stage_rank_0 = get_next_stage_pp_rank_0()
+            # Only TP rank 0 sends to the next stage
+            if current_tp_rank != 0:
+                return None
 
-                if next_stage_rank_0 is not None:
-                    # Convert to local rank in PP group
-                    pp_group = get_pp_group()
-                    dst_local = pp_group.ranks.index(next_stage_rank_0)
+            # Get next stage's rank 0
+            from vllm.distributed.heterogeneous_parallel import (
+                get_next_stage_pp_rank_0)
+            next_stage_rank_0 = get_next_stage_pp_rank_0()
 
-                    # Send using CPU hop if cross-backend
-                    # TODO (hetarth): cache this later
-                    if self._is_cross_backend_edge():
-                        # Use CPU group for cross-backend
-                        metadata_list, tensor_list = _split_tensor_dict(
-                            gathered_dict)
-                        self.send_object(metadata_list, dst=dst_local)
+            if next_stage_rank_0 is not None:
+                # Convert to local rank in PP group
+                pp_group = get_pp_group()
+                dst_local = pp_group.ranks.index(next_stage_rank_0)
 
-                        for tensor in tensor_list:
-                            if tensor.numel() > 0:
-                                cpu_tensor = tensor.cpu(
-                                ) if not tensor.is_cpu else tensor
-                                torch.distributed.send(
-                                    cpu_tensor,
-                                    dst=pp_group.ranks[dst_local],
-                                    group=self.cpu_group)
-                    else:
-                        # Same backend - use normal send
-                        self.send_tensor_dict(gathered_dict, dst=dst_local)
+                # Send using CPU hop if cross-backend
+                # TODO (hetarth): cache this later
+                if self._is_cross_backend_edge():
+                    # Use CPU group for cross-backend
+                    metadata_list, tensor_list = _split_tensor_dict(
+                        gathered_dict)
+                    self.send_object(metadata_list, dst=dst_local)
+
+                    for tensor in tensor_list:
+                        if tensor.numel() > 0:
+                            cpu_tensor = tensor.cpu(
+                            ) if not tensor.is_cpu else tensor
+                            torch.distributed.send(
+                                cpu_tensor,
+                                dst=pp_group.ranks[dst_local],
+                                group=self.cpu_group)
+                else:
+                    # Same backend - use normal send
+                    self.send_tensor_dict(gathered_dict, dst=dst_local)
 
         return None
 
