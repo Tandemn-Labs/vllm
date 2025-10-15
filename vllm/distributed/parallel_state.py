@@ -683,13 +683,15 @@ class GroupCoordinator:
         """Send the input tensor dictionary,
          across heterogeneous TP+PP groups. """
         # Bypass the function if we are using only 1 GPU.
-        if not torch.distributed.is_initialized() or self.world_size == 1:
+        if not torch.distributed.is_initialized():
             return tensor_dict
         # get the group and metadata group
         # group = self.device_group
         # metadata_group = self.cpu_group
         # use normal send if heterogeneous mode is not enabled
         if not is_heterogeneous_mode():
+            if self.world_size == 1:
+                return tensor_dict
             return self.send_tensor_dict(tensor_dict, dst, all_gather_group,
                                          all_gather_tensors)
         # if not, lets now do the real heterogenous send stuff
@@ -819,7 +821,7 @@ class GroupCoordinator:
             for key, value in tensor_dict.items():
                 if isinstance(value, torch.Tensor) and value.numel() > 0:
                     # All ranks call gather; only dst=0 receives the result
-                    gathered_value = tp_group.gather(value, dst=0, dim=0)
+                    gathered_value = tp_group.gather(value, dst=0, dim=-1)
                     # Only rank 0 gets non-None gathered_value
                     if current_tp_rank == 0 and gathered_value is not None:
                         gathered_dict[key] = gathered_value
@@ -870,12 +872,14 @@ class GroupCoordinator:
         all_gather_tensors: Optional[dict[str, bool]] = None
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         # 1) Bypass if not distributed or single worker
-        if not torch.distributed.is_initialized() or self.world_size == 1:
+        if not torch.distributed.is_initialized():
             return None
 
         # 2) Check if heterogeneous mode is enabled
         # else use the same stuff
         if not is_heterogeneous_mode():
+            if self.world_size == 1:
+                return None
             return self.recv_tensor_dict(src, all_gather_group,
                                          all_gather_tensors)
 
