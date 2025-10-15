@@ -483,6 +483,10 @@ def main():
     # Initialize distributed
     print(f"[Rank {rank}] Initializing (Node {node_rank}, Local {local_rank})")
 
+    # Set CUDA device for this rank
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
     init_distributed_environment(
         world_size=world_size,
         rank=rank,
