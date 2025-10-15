@@ -1,0 +1,10 @@
+{
+    "description": "1xA10G + 4xA10G configuration (2 nodes, 5 GPUs total)",
+    "per_stage_tp_sizes": [1, 4],
+    "pipeline_parallel_size": 2,
+    "test_sizes_mb": [1, 10, 100, 500],
+    "run_bandwidth_test": true,
+    "run_latency_test": true,
+    "run_stress_test": false,
+    "iterations": 20
+}
