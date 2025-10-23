@@ -22,6 +22,7 @@ If you only need to use the distributed environment without model/pipeline
  parallelism, you can skip the model parallel initialization and destruction
  steps.
 """
+
 import contextlib
 import gc
 import pickle
@@ -43,8 +44,8 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase)
 from vllm.distributed.heterogeneous_parallel import (
-    get_current_stage_info, get_heterogeneous_pp_groups,
-    get_next_stage_tp_size, get_prev_stage_tp_size, is_heterogeneous_mode,
+    get_current_stage_info, get_heterogeneous_config,
+    get_heterogeneous_pp_groups, get_stage_backends, is_heterogeneous_mode,
     reset_heterogeneous_config, set_heterogeneous_config)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
@@ -61,7 +62,7 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: dict[str, Union[torch.Tensor, Any]]
+    tensor_dict: dict[str, Union[torch.Tensor, Any]],
 ) -> tuple[list[tuple[str, Any]], list[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
@@ -265,17 +266,19 @@ class GroupCoordinator:
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
+
         self.mq_broadcaster: Optional[MessageQueue] = None
         if use_message_queue_broadcaster and self.world_size > 1:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6)
 
         from vllm.platforms import current_platform
+
         self.use_custom_op_call = (current_platform.is_cuda_alike()
                                    or current_platform.is_tpu())
 
-        self.use_cpu_custom_send_recv = (current_platform.is_cpu() and hasattr(
-            torch.ops._C, "init_shm_manager"))
+        self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
+            torch.ops._C, "init_shm_manager")
 
     @property
     def first_rank(self):
@@ -325,6 +328,7 @@ class GroupCoordinator:
         maybe_ca_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator)
+
         if self.device_communicator is not None:
             assert isinstance(self.device_communicator, CudaCommunicator)
             ca_comm = self.device_communicator.ca_comm
@@ -392,10 +396,12 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_gather(input_, dim)
 
-    def all_gatherv(self,
-                    input_: Union[torch.Tensor, list[torch.Tensor]],
-                    dim: int = 0,
-                    sizes: Optional[list[int]] = None):
+    def all_gatherv(
+        self,
+        input_: Union[torch.Tensor, list[torch.Tensor]],
+        dim: int = 0,
+        sizes: Optional[list[int]] = None,
+    ):
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_gatherv(input_, dim, sizes)
@@ -418,10 +424,12 @@ class GroupCoordinator:
         else:
             return self._reduce_scatter_out_place(input_, dim)
 
-    def reduce_scatterv(self,
-                        input_: torch.Tensor,
-                        dim: int = -1,
-                        sizes: Optional[list[int]] = None) -> torch.Tensor:
+    def reduce_scatterv(
+        self,
+        input_: torch.Tensor,
+        dim: int = -1,
+        sizes: Optional[list[int]] = None,
+    ) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
@@ -488,10 +496,12 @@ class GroupCoordinator:
                                                     group=self.cpu_group)
             return recv[0]
 
-    def broadcast_object_list(self,
-                              obj_list: list[Any],
-                              src: int = 0,
-                              group: Optional[ProcessGroup] = None):
+    def broadcast_object_list(
+        self,
+        obj_list: list[Any],
+        src: int = 0,
+        group: Optional[ProcessGroup] = None,
+    ):
         """Broadcast the input object list.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -557,7 +567,8 @@ class GroupCoordinator:
         object_tensor = torch.empty(  # type: ignore[call-overload]
             size_tensor.item(),  # type: ignore[arg-type]
             dtype=torch.uint8,
-            device="cpu")
+            device="cpu",
+        )
 
         rank_object = torch.distributed.recv(object_tensor,
                                              src=self.ranks[src],
@@ -575,13 +586,13 @@ class GroupCoordinator:
         tensor_dict: Optional[dict[str, Union[torch.Tensor, Any]]] = None,
         src: int = 0,
         group: Optional[ProcessGroup] = None,
-        metadata_group: Optional[ProcessGroup] = None
+        metadata_group: Optional[ProcessGroup] = None,
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Broadcast the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
         # Bypass the function if we are using only 1 GPU.
-        if (not torch.distributed.is_initialized() or self.world_size == 1):
+        if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
 
         group = self.device_group
@@ -606,10 +617,12 @@ class GroupCoordinator:
                     continue
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
-                    handle = torch.distributed.broadcast(tensor,
-                                                         src=self.ranks[src],
-                                                         group=metadata_group,
-                                                         async_op=True)
+                    handle = torch.distributed.broadcast(
+                        tensor,
+                        src=self.ranks[src],
+                        group=metadata_group,
+                        async_op=True,
+                    )
                 else:
                     # use group for GPU tensors
                     handle = torch.distributed.broadcast(tensor,
@@ -639,14 +652,16 @@ class GroupCoordinator:
                             tensor,
                             src=self.ranks[src],
                             group=metadata_group,
-                            async_op=True)
+                            async_op=True,
+                        )
                     else:
                         # use group for GPU tensors
                         handle = torch.distributed.broadcast(
                             tensor,
                             src=self.ranks[src],
                             group=group,
-                            async_op=True)
+                            async_op=True,
+                        )
                     async_handles.append(handle)
                     tensor_dict[key] = tensor
                 else:
@@ -655,307 +670,160 @@ class GroupCoordinator:
                 async_handle.wait()
         return tensor_dict
 
-    def _is_cross_backend_edge(self) -> bool:
-        """Check if the current PP edge crosses hardware backend boundaries.
-        This method determines whether communication with the next/previous
-        pipeline stage requires a CPU hop due to different hardware backends.
-        Returns:
-            True if next/prev stage uses different backend, False otherwise
-        Implementation Strategy:
-            1. Within a node: Use device-native backend (NCCL/RCCL/XLA)
-            2. Cross-node/cross-backend: Use CPU hop (gloo) for compatibility
-        Note:
-            This delegates to heterogeneous_parallel.is_cross_backend_edge()
-            which implements the detection logic based on stage backend info.
-        """
-        from vllm.distributed.heterogeneous_parallel import (
-            is_cross_backend_edge)
-        return is_cross_backend_edge()
-
     def send_tensor_dict_heterogeneous(
         self,
         tensor_dict: dict[str, Union[torch.Tensor, Any]],
         dst: Optional[
             int] = None,  # i think its not relevant for heterogeneous
         all_gather_group: Optional["GroupCoordinator"] = None,
-        all_gather_tensors: Optional[dict[str, bool]] = None
+        all_gather_tensors: Optional[dict[str, bool]] = None,
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary,
-         across heterogeneous TP+PP groups. """
-        # Bypass the function if we are using only 1 GPU.
-        if not torch.distributed.is_initialized():
-            return tensor_dict
-        # get the group and metadata group
-        # group = self.device_group
-        # metadata_group = self.cpu_group
-        # use normal send if heterogeneous mode is not enabled
-        if not is_heterogeneous_mode():
-            if self.world_size == 1:
-                return tensor_dict
-            return self.send_tensor_dict(tensor_dict, dst, all_gather_group,
-                                         all_gather_tensors)
-        # if not, lets now do the real heterogenous send stuff
-        # get the current stage and rank information
-        current_stage_info = get_current_stage_info()
-        current_tp_size = current_stage_info['tp_size']
-        # current_tp_rank = current_stage_info['tp_rank']
-        # get the next stage tp size
-        next_stage_tp_size = get_next_stage_tp_size()
-        # default to normal if next rank is same
-        # and the size of TP is the same as well
-        if (current_tp_size
-                == next_stage_tp_size) and not (self._is_cross_backend_edge()):
-            # default to normal send_tensor_dict
-            return self.send_tensor_dict(tensor_dict, dst, all_gather_group,
-                                         all_gather_tensors)
-        # if there is no next stage (let's say this is the last rank)
-        if next_stage_tp_size is None:
-            return None
+        across heterogeneous TP+PP groups."""
 
-        # case 1 - When current TP >1 and next stage has TP = 1
-        #  or smaller than current TP
-        if current_tp_size > 1 and (next_stage_tp_size == 1
-                                    or current_tp_size > next_stage_tp_size):
-            # TODO(Hetarth): Implement gather-send pattern
-            # All-gather within TP group, then TP rank 0 send
-            # get TP Group
-            tp_group = get_tp_group()
-            current_tp_rank = tp_group.rank_in_group
+        # This function is called as a subfunction of send_tensor_dict
+        # Some sanity checks are alrd completed, such as last stage check
+        # The actual sending procedure is almost the same as send_tensor_dict,
+        # Key diff is that all_gather optimization is completely disabled
 
-            # All TP ranks must participate in the gather collective
-            gathered_dict = {}
-            for key, value in tensor_dict.items():
-                if isinstance(value, torch.Tensor) and value.numel() > 0:
-                    # All ranks call gather; only dst=0 receives the result
-                    gathered_value = tp_group.gather(value, dst=0, dim=-1)
-                    # Only rank 0 gets non-None gathered_value
-                    # reconsutruct the sharded HIDDEN STATE hence dim=-1
-                    # the ranks usually have
-                    # [Batch Size, Sequence Length, Hidden Size//rank]
-                    if current_tp_rank == 0 and gathered_value is not None:
-                        gathered_dict[key] = gathered_value
-                else:
-                    if current_tp_rank == 0:
-                        gathered_dict[key] = value
+        stage_info = get_current_stage_info()
+        stage_backends = get_stage_backends()
+        pp_rank = stage_info["pp_rank"]
+        cross_backend = stage_backends[pp_rank] == stage_backends[pp_rank + 1]
 
-            # Only TP rank 0 sends to the next stage
-            if current_tp_rank != 0:
-                return None
+        group = self.device_group
+        metadata_group = self.cpu_group
 
-            # Get next stage's TP rank 0 using the helper function
-            from vllm.distributed.heterogeneous_parallel import (
-                get_next_stage_pp_rank_0)
-            next_stage_rank_0 = get_next_stage_pp_rank_0()
+        # In all cases, we send the tensor from the TP rank 0 to the TP rank 0
+        # of the next PP stage. TP ranks =/= 0 need not participate
+        if stage_info["tp_rank"] != 0:
+            return None  # TODO: Figure out the right return type
 
-            if next_stage_rank_0 is not None:
-                # Convert global rank to local rank in PP group
-                pp_group = get_pp_group()
-                dst_local = pp_group.ranks.index(next_stage_rank_0)
+        # Set dst
+        if dst is None:
+            dst = self.rank_in_group + 1
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
-                # Send using CPU hop if cross-backend
-                if self._is_cross_backend_edge():
-                    # Use CPU group for cross-backend
-                    # Split and send via CPU
-                    metadata_list, tensor_list = _split_tensor_dict(
-                        gathered_dict)
-                    self.send_object(metadata_list, dst=dst_local)
+        metadata_list: list[tuple[Any, Any]] = []
+        assert isinstance(
+            tensor_dict,
+            dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
+        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+        # `metadata_list` lives in CPU memory.
+        # `send_object_list` has serialization & deserialization,
+        # all happening on CPU. Therefore, we can use the CPU group.
+        self.send_object(metadata_list, dst=dst)
 
-                    for tensor in tensor_list:
-                        if tensor.numel() > 0:
-                            # Move to CPU if needed
-                            cpu_tensor = tensor.cpu(
-                            ) if not tensor.is_cpu else tensor
-                            torch.distributed.send(
-                                cpu_tensor,
-                                dst=pp_group.ranks[dst_local],
-                                group=self.cpu_group)
-                else:
-                    # Same backend - use normal send
-                    self.send_tensor_dict(gathered_dict, dst=dst_local)
-        # case 2 - When current TP = 1 and next stage has TP > 1
-        elif current_tp_size == 1 and next_stage_tp_size > 1:
-            # TODO(Hetarth): Implement send-broadcast pattern
-            # TP rank 0 sends, receiver broadcasts within TP group
-            # tp_group = get_tp_group()
-            # current_tp_rank = tp_group.rank_in_group
-            from vllm.distributed.heterogeneous_parallel import (
-                get_next_stage_pp_rank_0)
-            next_stage_rank_0 = get_next_stage_pp_rank_0()
+        for tensor in tensor_list:
+            if tensor.numel() == 0:
+                # Skip sending empty tensors.
+                continue
 
-            if next_stage_rank_0 is not None:
-                # Convert global rank to local rank in PP group
-                pp_group = get_pp_group()
-                dst_local = pp_group.ranks.index(next_stage_rank_0)
-
-                # Send using CPU hop if cross-backend
-                # TODO (hetarth): cache this later
-                if self._is_cross_backend_edge():
-                    # Use CPU group for cross-backend
-                    # Split and send via CPU
-                    metadata_list, tensor_list = _split_tensor_dict(
-                        tensor_dict)
-                    self.send_object(metadata_list, dst=dst_local)
-
-                    for tensor in tensor_list:
-                        if tensor.numel() > 0:
-                            # Move to CPU if needed
-                            cpu_tensor = tensor.cpu(
-                            ) if not tensor.is_cpu else tensor
-                            torch.distributed.send(
-                                cpu_tensor,
-                                dst=pp_group.ranks[dst_local],
-                                group=self.cpu_group)
-                else:
-                    # Same backend - use normal send
-                    self.send_tensor_dict(tensor_dict, dst=dst_local)
-
-        # case 3 - Both TP > 1
-        else:
-            # Both stages have TP > 1
-            # This is similar to case 1 but applies even when next TP is larger
-            tp_group = get_tp_group()
-            current_tp_rank = tp_group.rank_in_group
-
-            # All TP ranks must participate in the gather collective
-            gathered_dict = {}
-            for key, value in tensor_dict.items():
-                if isinstance(value, torch.Tensor) and value.numel() > 0:
-                    # All ranks call gather; only dst=0 receives the result
-                    gathered_value = tp_group.gather(value, dst=0, dim=-1)
-                    # Only rank 0 gets non-None gathered_value
-                    if current_tp_rank == 0 and gathered_value is not None:
-                        gathered_dict[key] = gathered_value
-                else:
-                    if current_tp_rank == 0:
-                        gathered_dict[key] = value
-
-            # Only TP rank 0 sends to the next stage
-            if current_tp_rank != 0:
-                return None
-
-            # Get next stage's rank 0
-            from vllm.distributed.heterogeneous_parallel import (
-                get_next_stage_pp_rank_0)
-            next_stage_rank_0 = get_next_stage_pp_rank_0()
-
-            if next_stage_rank_0 is not None:
-                # Convert to local rank in PP group
-                pp_group = get_pp_group()
-                dst_local = pp_group.ranks.index(next_stage_rank_0)
-
-                # Send using CPU hop if cross-backend
-                # TODO (hetarth): cache this later
-                if self._is_cross_backend_edge():
-                    # Use CPU group for cross-backend
-                    metadata_list, tensor_list = _split_tensor_dict(
-                        gathered_dict)
-                    self.send_object(metadata_list, dst=dst_local)
-
-                    for tensor in tensor_list:
-                        if tensor.numel() > 0:
-                            cpu_tensor = tensor.cpu(
-                            ) if not tensor.is_cpu else tensor
-                            torch.distributed.send(
-                                cpu_tensor,
-                                dst=pp_group.ranks[dst_local],
-                                group=self.cpu_group)
-                else:
-                    # Same backend - use normal send
-                    self.send_tensor_dict(gathered_dict, dst=dst_local)
-
+            if tensor.is_cpu or cross_backend:
+                # use metadata_group for CPU tensors
+                tensor = tensor.cpu() if not tensor.is_cpu else tensor
+                torch.distributed.send(tensor,
+                                       dst=self.ranks[dst],
+                                       group=metadata_group)
+            else:
+                # use group for GPU tensors
+                torch.distributed.send(tensor,
+                                       dst=self.ranks[dst],
+                                       group=group)
         return None
 
     def recv_tensor_dict_heterogeneous(
         self,
         src: Optional[int] = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
-        all_gather_tensors: Optional[dict[str, bool]] = None
+        all_gather_tensors: Optional[dict[str, bool]] = None,
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
-        # 1) Bypass if not distributed or single worker
-        if not torch.distributed.is_initialized():
-            return None
+        # This function is called as a subfunction of recv_tensor_dict
+        # Some sanity checks are alrd completed, such as first stage check
+        # The actual receiving procedure is almost the same as recv_tensor_dict,
+        # Key diff is that all_gather optimization is completely disabled
 
-        # 2) Check if heterogeneous mode is enabled
-        # else use the same stuff
-        if not is_heterogeneous_mode():
-            if self.world_size == 1:
-                return None
-            return self.recv_tensor_dict(src, all_gather_group,
-                                         all_gather_tensors)
-
-        # 3) Get the current stage and rank information
-        current_stage_info = get_current_stage_info()
-        current_tp_size = current_stage_info['tp_size']
-        prev_tp_size = get_prev_stage_tp_size()
-        # if first stage, return None
-        if prev_tp_size is None:
-            return None
-        # 4) if not cross backend, and same TP
-        # use the optimized default path
-        if (current_tp_size
-                == prev_tp_size) and not self._is_cross_backend_edge():
-            return self.recv_tensor_dict(src, all_gather_group,
-                                         all_gather_tensors)
-
-        # 5) get current tp and pp rank
+        stage_info = get_current_stage_info()
+        stage_backends = get_stage_backends()
+        pp_rank = stage_info["pp_rank"]
+        tp_rank = stage_info["tp_rank"]
+        cross_backend = stage_backends[pp_rank] == stage_backends[pp_rank - 1]
         tp_group = get_tp_group()
-        current_tp_rank = tp_group.rank_in_group
-        pp_group = get_pp_group()
 
-        # 6) Get previous stage's PP Rank 0
-        from vllm.distributed.heterogeneous_parallel import (
-            get_prev_stage_pp_rank_0)
-        prev_stage_pp_rank_0 = get_prev_stage_pp_rank_0()
-        if prev_stage_pp_rank_0 is None:
-            return None
+        group = self.device_group
+        metadata_group = self.cpu_group
 
-        # 7) Convert global rank to local rank in PP group
-        try:
-            src_local = pp_group.ranks.index(prev_stage_pp_rank_0)
-        except ValueError:
-            return None
-        received_dict: Optional[dict[str, Union[torch.Tensor, Any]]] = None
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
 
-        # 7) if current tp rank is 0, we need to broadcast
-        if current_tp_rank == 0:
-            if self._is_cross_backend_edge():
-                # recieve metadata first
-                metadata_list = self.recv_object(src=src_local)
-                # then recieve the tensors
-                received_dict = {}
-                for key, value in metadata_list:
-                    if isinstance(value, TensorMetadata):
-                        tensor = torch.empty(value.size,
-                                             dtype=value.dtype,
-                                             device="cpu")
-                        if tensor.numel() > 0:
-                            torch.distributed.recv(
-                                tensor,
-                                src=pp_group.ranks[src_local],
-                                group=self.cpu_group)
-                        # move to local device if available (GPU/XPU/TPU)
-                        if self.device.type != "cpu":
-                            tensor = tensor.to(self.device, non_blocking=True)
-                        received_dict[key] = tensor
+        # In all cases, we send the tensor from the TP rank 0 to the TP rank 0
+        # of the next PP stage. TP ranks =/= 0 do not receive the tensor from
+        # the other node. Instead, TP rank 0 receives it and shares it with all
+        # ranks in the TP group
+
+        # TP rank 0 receives metadata and tensors
+        tensor_dict: dict[str, Any] = {}
+        if tp_rank == 0:
+            tp_size = stage_info["tp_size"]
+            broadcast = tp_size > 1
+
+            recv_metadata_list = self.recv_object(src=src)
+            if broadcast:
+                tp_group.broadcast_object(recv_metadata_list, src=0)
+
+            for key, value in recv_metadata_list:
+                if isinstance(value, TensorMetadata):
+                    tensor = torch.empty(value.size,
+                                         dtype=value.dtype,
+                                         device=value.device)
+                    if tensor.numel() == 0:
+                        # Skip broadcasting empty tensors.
+                        tensor_dict[key] = tensor
+                        continue
+
+                    if tensor.is_cpu or cross_backend:
+                        # use metadata_group for CPU tensors
+                        torch.distributed.recv(tensor,
+                                               src=self.ranks[src],
+                                               group=metadata_group)
+                        # TODO: Convert the tensor back into device tensor?
                     else:
-                        received_dict[key] = value
-            else:
-                # same backend - use normal optimized recieve
-                received_dict = self.recv_tensor_dict(
-                    src=src_local,
-                    all_gather_group=tp_group,
-                    all_gather_tensors=all_gather_tensors)
-        if current_tp_size > 1:
-            if current_tp_rank == 0:
-                # broadcast to all other ranks in the group
-                return tp_group.broadcast_tensor_dict(received_dict, src=0)
-            else:
-                # if other stages, dont do anything
-                return tp_group.broadcast_tensor_dict(None, src=0)
+                        # use group for GPU tensors
+                        torch.distributed.recv(tensor,
+                                               src=self.ranks[src],
+                                               group=group)
+
+                    # Share received tensor with all ranks in TP group
+                    if broadcast:
+                        tp_group.broadcast(tensor, src=0)
+
+                    tensor_dict[key] = tensor
+                else:
+                    tensor_dict[key] = value
+            return tensor_dict
+
+        # All other TP ranks wait to receive metadata and tensor from TP-rank=0
         else:
-            if current_tp_rank == 0:
-                return received_dict
-            return None
+            recv_metadata_list = tp_group.broadcast_object(src=0)
+
+            for key, value in recv_metadata_list:
+                if isinstance(value, TensorMetadata):
+                    tensor = torch.empty(value.size,
+                                         dtype=value.dtype,
+                                         device=value.device)
+                    if tensor.numel() == 0:
+                        # Skip broadcasting empty tensors.
+                        tensor_dict[key] = tensor
+                        continue
+
+                    tensor = tp_group.broadcast(tensor, src=0)
+
+                    tensor_dict[key] = tensor
+                else:
+                    tensor_dict[key] = value
+
+            return tensor_dict
 
     def send_tensor_dict(
         self,
@@ -985,6 +853,31 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
+
+        # Check for heterogeneous cases
+        if is_heterogeneous_mode():
+            stage_info = get_current_stage_info()
+            pp_rank = stage_info["pp_rank"]
+            hetero_config = get_heterogeneous_config()
+            assert hetero_config is not None, (
+                "Heterogeneous mode but _HETERO_CONFIG not set")
+            per_stage_tp_sizes = hetero_config["per_stage_tp_sizes"]
+
+            # If last stage in pipeline, do nothing
+            if (pp_rank + 1) == len(per_stage_tp_sizes):
+                return tensor_dict
+
+            tp_size = stage_info["tp_size"]
+            next_tp_size = per_stage_tp_sizes[pp_rank + 1]
+            stage_backends = get_stage_backends()
+
+            # Only if both conditions are met, then use the default
+            # n to n behaviour. Else, call send_tensor_dict_heterogeneous()
+            if (tp_size != next_tp_size) or (stage_backends[pp_rank]
+                                             != stage_backends[pp_rank + 1]):
+                return self.send_tensor_dict_heterogeneous(
+                    tensor_dict, dst, all_gather_group, all_gather_tensors)
+
         all_gather_size = (1 if all_gather_group is None else
                            all_gather_group.world_size)
         all_gather_rank = (0 if all_gather_group is None else
@@ -1007,7 +900,7 @@ class GroupCoordinator:
         metadata_list: list[tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
-            dict), f"Expecting a dictionary, got {type(tensor_dict)}"
+            dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
         # `metadata_list` lives in CPU memory.
         # `send_object_list` has serialization & deserialization,
@@ -1027,8 +920,8 @@ class GroupCoordinator:
             # send-allgather: send only a slice, then do allgather.
             use_all_gather = (all_gather_group is not None
                               and tensor.numel() % all_gather_size == 0)
-            use_all_gather = all_gather_tensors.get(key, use_all_gather) \
-                if all_gather_tensors else use_all_gather
+            use_all_gather = (all_gather_tensors.get(key, use_all_gather)
+                              if all_gather_tensors else use_all_gather)
             if use_all_gather:
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
@@ -1071,6 +964,31 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None
+
+        # Check for heterogeneous cases
+        if is_heterogeneous_mode():
+            stage_info = get_current_stage_info()
+            pp_rank = stage_info["pp_rank"]
+            hetero_config = get_heterogeneous_config()
+            assert hetero_config is not None, (
+                "Heterogeneous mode but _HETERO_CONFIG not set")
+            per_stage_tp_sizes = hetero_config["per_stage_tp_sizes"]
+
+            # If first stage in pipeline, do nothing
+            if pp_rank == 0:
+                return None
+
+            tp_size = stage_info["tp_size"]
+            prev_tp_size = per_stage_tp_sizes[pp_rank - 1]
+            stage_backends = get_stage_backends()
+
+            # Only if both conditions are met, then use the default
+            # n to n behaviour. Else, call send_tensor_dict_heterogeneous()
+            if (tp_size != prev_tp_size) or (stage_backends[pp_rank]
+                                             != stage_backends[pp_rank - 1]):
+                return self.recv_tensor_dict_heterogeneous(
+                    src, all_gather_group, all_gather_tensors)
+
         all_gather_size = (1 if all_gather_group is None else
                            all_gather_group.world_size)
         all_gather_rank = (0 if all_gather_group is None else
@@ -1104,8 +1022,8 @@ class GroupCoordinator:
                 # send-allgather: send only a slice, then do allgather.
                 use_all_gather = (all_gather_group is not None
                                   and tensor.numel() % all_gather_size == 0)
-                use_all_gather = all_gather_tensors.get(key, use_all_gather) \
-                    if all_gather_tensors else use_all_gather
+                use_all_gather = (all_gather_tensors.get(key, use_all_gather)
+                                  if all_gather_tensors else use_all_gather)
 
                 if use_all_gather:
                     orig_shape = tensor.shape
@@ -1180,7 +1098,7 @@ class GroupCoordinator:
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        is_sequence_parallel: bool = False
+        is_sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.device_communicator is not None:
             return self.device_communicator.dispatch(hidden_states,
@@ -1204,7 +1122,7 @@ _NODE_COUNT: Optional[int] = None
 
 
 def get_world_group() -> GroupCoordinator:
-    assert _WORLD is not None, ("world group is not initialized")
+    assert _WORLD is not None, "world group is not initialized"
     return _WORLD
 
 
@@ -1226,7 +1144,6 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: Optional[str] = None,
 ) -> GroupCoordinator:
-
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
@@ -1241,7 +1158,7 @@ _TP: Optional[GroupCoordinator] = None
 
 
 def get_tp_group() -> GroupCoordinator:
-    assert _TP is not None, ("tensor model parallel group is not initialized")
+    assert _TP is not None, "tensor model parallel group is not initialized"
     return _TP
 
 
@@ -1270,7 +1187,7 @@ _DP: Optional[GroupCoordinator] = None
 
 
 def get_dp_group() -> GroupCoordinator:
-    assert _DP is not None, ("data parallel group is not initialized")
+    assert _DP is not None, "data parallel group is not initialized"
     return _DP
 
 
@@ -1278,13 +1195,12 @@ _EP: Optional[GroupCoordinator] = None
 
 
 def get_ep_group() -> GroupCoordinator:
-    assert _EP is not None, ("expert parallel group is not initialized")
+    assert _EP is not None, "expert parallel group is not initialized"
     return _EP
 
 
 def get_pp_group() -> GroupCoordinator:
-    assert _PP is not None, (
-        "pipeline model parallel group is not initialized")
+    assert _PP is not None, "pipeline model parallel group is not initialized"
     return _PP
 
 
@@ -1311,8 +1227,10 @@ def graph_capture(device: torch.device):
     from other kernels possibly launched on background in the default stream.
     """
     context = GraphCaptureContext(torch.cuda.Stream(device=device))
-    with get_tp_group().graph_capture(context), get_pp_group().graph_capture(
-            context):
+    with (
+            get_tp_group().graph_capture(context),
+            get_pp_group().graph_capture(context),
+    ):
         yield context
 
 
@@ -1326,21 +1244,29 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
-def init_distributed_environment(world_size: int = -1,
-                                 rank: int = -1,
-                                 distributed_init_method: str = "env://",
-                                 local_rank: int = -1,
-                                 backend: str = "nccl",
-                                 timeout: Optional[timedelta] = None):
+def init_distributed_environment(
+    world_size: int = -1,
+    rank: int = -1,
+    distributed_init_method: str = "env://",
+    local_rank: int = -1,
+    backend: str = "nccl",
+    timeout: Optional[timedelta] = None,
+):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
-        "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
-        distributed_init_method, backend)
+        "distributed_init_method=%s backend=%s",
+        world_size,
+        rank,
+        local_rank,
+        distributed_init_method,
+        backend,
+    )
     from vllm.config import get_current_vllm_config
+
     config = get_current_vllm_config()
-    if config is not None and config.parallel_config.data_parallel_size > 1 \
-        and config.parallel_config.distributed_executor_backend \
-        != "external_launcher":
+    if (config is not None and config.parallel_config.data_parallel_size > 1
+            and config.parallel_config.distributed_executor_backend
+            != "external_launcher"):
         parallel_config = config.parallel_config
         # adjust to take into account data parallelism
         # offset the rank by the data parallel rank
@@ -1352,7 +1278,10 @@ def init_distributed_environment(world_size: int = -1,
         distributed_init_method = get_distributed_init_method(ip, port)
         logger.info(
             "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
-            world_size, rank, distributed_init_method)
+            world_size,
+            rank,
+            distributed_init_method,
+        )
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -1360,7 +1289,9 @@ def init_distributed_environment(world_size: int = -1,
         if not torch.distributed.is_backend_available(backend):
             logger.warning(
                 "Distributed backend %s is not available; "
-                "falling back to gloo.", backend)
+                "falling back to gloo.",
+                backend,
+            )
             assert torch.distributed.is_gloo_available(), (
                 "Fallback Gloo backend is not available.")
             backend = "gloo"
@@ -1370,7 +1301,8 @@ def init_distributed_environment(world_size: int = -1,
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank,
-            timeout=timeout)
+            timeout=timeout,
+        )
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -1431,6 +1363,7 @@ def initialize_model_parallel(
 
     data_parallel_size = 1
     from vllm.config import get_current_vllm_config
+
     config = get_current_vllm_config()
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
@@ -1445,21 +1378,26 @@ def initialize_model_parallel(
     # to get group_ranks for each dimension, transpose that dimension to the
     # last dimension, then reshape to 2D, then unbind the last dimension
     all_ranks = torch.arange(world_size).reshape(
-        -1, data_parallel_size, pipeline_model_parallel_size,
-        tensor_model_parallel_size)  # noqa
+        -1,
+        data_parallel_size,
+        pipeline_model_parallel_size,
+        tensor_model_parallel_size,
+    )  # noqa
 
     # Build the tensor model-parallel groups.
     global _TP
-    assert _TP is None, ("tensor model parallel group is already initialized")
+    assert _TP is None, "tensor model parallel group is already initialized"
     group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
 
     # message queue broadcaster is only used in tensor model parallel group
-    _TP = init_model_parallel_group(group_ranks,
-                                    get_world_group().local_rank,
-                                    backend,
-                                    use_message_queue_broadcaster=True,
-                                    group_name="tp")
+    _TP = init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        use_message_queue_broadcaster=True,
+        group_name="tp",
+    )
 
     # Build the DCP model-parallel groups.
     global _DCP
@@ -1472,18 +1410,19 @@ def initialize_model_parallel(
     group_ranks = all_ranks.reshape(
         -1, decode_context_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    _DCP = init_model_parallel_group(group_ranks,
-                                     get_world_group().local_rank,
-                                     backend,
-                                     use_message_queue_broadcaster=True,
-                                     group_name="dcp")
+    _DCP = init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        use_message_queue_broadcaster=True,
+        group_name="dcp",
+    )
 
     # Build the pipeline model-parallel groups.
     global _PP
-    assert _PP is None, (
-        "pipeline model parallel group is already initialized")
-    group_ranks = all_ranks.transpose(2, 3).reshape(
-        -1, pipeline_model_parallel_size).unbind(0)
+    assert _PP is None, "pipeline model parallel group is already initialized"
+    group_ranks = (all_ranks.transpose(2, 3).reshape(
+        -1, pipeline_model_parallel_size).unbind(0))
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
@@ -1491,10 +1430,9 @@ def initialize_model_parallel(
                                     group_name="pp")
 
     global _DP
-    assert _DP is None, ("data parallel group is already initialized")
-    group_ranks = all_ranks.transpose(1,
-                                      3).reshape(-1,
-                                                 data_parallel_size).unbind(0)
+    assert _DP is None, "data parallel group is already initialized"
+    group_ranks = (all_ranks.transpose(1, 3).reshape(
+        -1, data_parallel_size).unbind(0))
     group_ranks = [x.tolist() for x in group_ranks]
     _DP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
@@ -1502,9 +1440,9 @@ def initialize_model_parallel(
                                     group_name="dp")
 
     global _EP
-    assert _EP is None, ("expert parallel group is already initialized")
-    group_ranks = all_ranks.transpose(1, 2).reshape(
-        -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
+    assert _EP is None, "expert parallel group is already initialized"
+    group_ranks = (all_ranks.transpose(1, 2).reshape(
+        -1, data_parallel_size * tensor_model_parallel_size).unbind(0))
     group_ranks = [x.tolist() for x in group_ranks]
     _EP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
@@ -1513,9 +1451,14 @@ def initialize_model_parallel(
 
     logger.info(
         "rank %s in world size %s is assigned as "
-        "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
-        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
-        _EP.rank_in_group)
+        "DP rank %s, PP rank %s, TP rank %s, EP rank %s",
+        rank,
+        world_size,
+        _DP.rank_in_group,
+        _PP.rank_in_group,
+        _TP.rank_in_group,
+        _EP.rank_in_group,
+    )
 
 
 def initialize_model_parallel_heterogeneous(
@@ -1525,11 +1468,11 @@ def initialize_model_parallel_heterogeneous(
 ) -> None:
     """Initialize model parallel groups with
     heterogeneous TP sizes per stage.
-    
+
     This function creates process groups for
     heterogeneous tensor parallelism (Heterogeneous TP+PP)
     where different pipeline stages can have different TP sizes.
-    
+
     Args:
         per_stage_tp_sizes: List of TP sizes for each pipeline stage.
             Example: [4, 1, 2, 1] means stage 0
@@ -1537,11 +1480,11 @@ def initialize_model_parallel_heterogeneous(
             (second pipeline stage) has TP=1, etc.
         pipeline_model_parallel_size: Number of pipeline stages.
         backend: PyTorch distributed backend to use.
-        
+
     Example:
         For per_stage_tp_sizes=[4, 1, 2, 1] with 8 GPUs:
         - Ranks 0-3: Stage 0 (TP=4)
-        - Rank 4: Stage 1 (TP=1) 
+        - Rank 4: Stage 1 (TP=1)
         - Ranks 5-6: Stage 2 (TP=2)
         - Rank 7: Stage 3 (TP=1)
     """
@@ -1551,8 +1494,8 @@ def initialize_model_parallel_heterogeneous(
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
     rank = torch.distributed.get_rank()
-    local_rank = get_world_group(
-    ).local_rank  # to find where i am currently running
+    local_rank = (get_world_group().local_rank
+                  )  # to find where i am currently running
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)  # currently homogenous
     # (as process group cannot be different on different nodes)
@@ -1575,21 +1518,22 @@ def initialize_model_parallel_heterogeneous(
         for tp_rank in range(tp_size):
             gpu_id = gpu_offset + tp_rank
             rank_to_stage_info[gpu_id] = {
-                'stage': stage_idx,
-                'tp_size': tp_size,
-                'tp_rank': tp_rank,
+                "stage": stage_idx,
+                "tp_size": tp_size,
+                "tp_rank": tp_rank,
             }
         gpu_offset += tp_size
     # Store heterogeneous configuration
     hetero_config = {
-        'per_stage_tp_sizes': per_stage_tp_sizes,
-        'rank_to_stage_info': rank_to_stage_info,
-        'pipeline_parallel_size': pipeline_model_parallel_size,
+        "per_stage_tp_sizes": per_stage_tp_sizes,
+        "rank_to_stage_info": rank_to_stage_info,
+        "pipeline_parallel_size": pipeline_model_parallel_size,
     }
     set_heterogeneous_config(hetero_config)
     # Auto-detect backends for all stages
     from vllm.distributed.heterogeneous_parallel import (
         auto_detect_stage_backends)
+
     try:
         stage_backends = auto_detect_stage_backends()
         logger.info("Detected stage backends: %s", stage_backends)
@@ -1620,11 +1564,13 @@ def initialize_model_parallel_heterogeneous(
         gpu_offset += tp_size
 
     # Creating all tp groups at once
-    _TP = init_model_parallel_group(tp_group_ranks,
-                                    local_rank,
-                                    backend,
-                                    use_message_queue_broadcaster=True,
-                                    group_name="tp")
+    _TP = init_model_parallel_group(
+        tp_group_ranks,
+        local_rank,
+        backend,
+        use_message_queue_broadcaster=True,
+        group_name="tp",
+    )
 
     # For per_stage_tp_sizes=[4, 1, 2, 1], this will create:
     # Stage 0 (TP=4): TP group [0, 1, 2, 3] - ranks 0,1,2,3 get this group
@@ -1645,9 +1591,9 @@ def initialize_model_parallel_heterogeneous(
     # Build pp_group_ranks_list from the configuration
     pp_group_ranks_list = []
     pp_group_ranks_list.append(
-        pp_config['main'])  # Add main PP group [0,4,5,7]
+        pp_config["main"])  # Add main PP group [0,4,5,7]
     pp_group_ranks_list.extend(
-        pp_config['dummy'])  # Add all dummy groups [[1], [2], [3], [6]]
+        pp_config["dummy"])  # Add all dummy groups [[1], [2], [3], [6]]
 
     # For [4,1,2,1], pp_group_ranks_list = [[0,4,5,7], [1], [2], [3], [6]]
 
@@ -1705,9 +1651,13 @@ def initialize_model_parallel_heterogeneous(
     stage_info = rank_to_stage_info[rank]
     logger.info(
         "Heterogeneous parallel: rank %s is assigned as "
-        "stage %s with TP size %s, TP rank %s, PP group %s", rank,
-        stage_info['stage'], stage_info['tp_size'], stage_info['tp_rank'],
-        _PP.ranks)
+        "stage %s with TP size %s, TP rank %s, PP group %s",
+        rank,
+        stage_info["stage"],
+        stage_info["tp_size"],
+        stage_info["tp_rank"],
+        _PP.ranks,
+    )
 
 
 def ensure_model_parallel_initialized(
@@ -1720,7 +1670,7 @@ def ensure_model_parallel_initialized(
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
-    
+
     Args:
         tensor_model_parallel_size: Uniform TP size (
         ignored if per_stage_tp_sizes is set).
@@ -1739,10 +1689,12 @@ def ensure_model_parallel_initialized(
                 per_stage_tp_sizes, pipeline_model_parallel_size, backend)
         else:
             # Standard uniform mode
-            initialize_model_parallel(tensor_model_parallel_size,
-                                      pipeline_model_parallel_size,
-                                      decode_context_model_parallel_size,
-                                      backend)
+            initialize_model_parallel(
+                tensor_model_parallel_size,
+                pipeline_model_parallel_size,
+                decode_context_model_parallel_size,
+                backend,
+            )
         return
 
     assert (
@@ -1751,7 +1703,7 @@ def ensure_model_parallel_initialized(
         f"got: {get_tensor_model_parallel_world_size()=} vs. "
         f"wanted: {tensor_model_parallel_size=}")
     pp_world_size = get_pp_group().world_size
-    assert (pp_world_size == pipeline_model_parallel_size), (
+    assert pp_world_size == pipeline_model_parallel_size, (
         "pipeline parallel group already initialized, but of unexpected size. "
         f"got: {pp_world_size=} vs. "
         f"wanted: {pipeline_model_parallel_size=}")
@@ -1776,7 +1728,7 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_TP is not None and _PP is not None)
+    return _TP is not None and _PP is not None
 
 
 _TP_STATE_PATCHED = False
@@ -1828,9 +1780,8 @@ def get_decode_context_model_parallel_rank():
 
 
 def get_node_count() -> int:
-    """Return the total number of nodes in the distributed environment. """
-    assert _NODE_COUNT is not None, (
-        "distributed environment is not initialized")
+    """Return the total number of nodes in the distributed environment."""
+    assert _NODE_COUNT is not None, "distributed environment is not initialized"
     return _NODE_COUNT
 
 
@@ -1838,6 +1789,7 @@ def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     # Reset heterogeneous configuration if it exists
     from vllm.distributed.heterogeneous_parallel import is_heterogeneous_mode
+
     if is_heterogeneous_mode():
         reset_heterogeneous_config()
     global _TP
@@ -1882,9 +1834,11 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_distributed_environment()
     if shutdown_ray:
         import ray  # Lazy import Ray
+
         ray.shutdown()
     gc.collect()
     from vllm.platforms import current_platform
+
     empty_cache = current_platform.empty_cache
     if empty_cache is not None:
         empty_cache()
@@ -1904,9 +1858,9 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
     memory system (shared access to shared memory).
     """
     if isinstance(pg, ProcessGroup):
-        assert torch.distributed.get_backend(
-            pg) != torch.distributed.Backend.NCCL, (
-                "in_the_same_node_as should be tested with a non-NCCL group.")
+        assert (
+            torch.distributed.get_backend(pg) != torch.distributed.Backend.NCCL
+        ), "in_the_same_node_as should be tested with a non-NCCL group."
         # local rank inside the group
         rank = torch.distributed.get_rank(group=pg)
         world_size = torch.distributed.get_world_size(group=pg)
@@ -1948,8 +1902,10 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
                 # fix to https://stackoverflow.com/q/62748654/9191338
                 # Python incorrectly tracks shared memory even if it is not
                 # created by the process. The following patch is a workaround.
-                with patch("multiprocessing.resource_tracker.register",
-                           lambda *args, **kwargs: None):
+                with patch(
+                        "multiprocessing.resource_tracker.register",
+                        lambda *args, **kwargs: None,
+                ):
                     shm = shared_memory.SharedMemory(name=name)
                 if shm.buf[:len(magic_message)] == magic_message:
                     is_in_the_same_node[rank] = 1

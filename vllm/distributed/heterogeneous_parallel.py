@@ -309,103 +309,86 @@ def get_current_backend_type() -> str:
         return 'unknown'
 
 
-def is_cross_backend_edge() -> bool:
-    """Check if current PP edge crosses hardware backend boundaries.
-    In heterogenous mode, we assume that the current node is homogenous. 
-    
-    We check here if the rank is sending to or
-    receiving from a different hardware backend (e.g., CUDA → ROCm).
-    When true, communication should use CPU Backend.
-    """
-    # check if heterogeneous mode is enabled
-    if not is_heterogeneous_mode():
-        return False
-    # double check
-    assert _HETERO_CONFIG is not None
+# def is_cross_backend_edge() -> bool:
+#     """Check if current PP edge crosses hardware backend boundaries.
+#     In heterogenous mode, we assume that the current node is homogenous.
 
-    # Get current stage info
-    info = get_current_stage_info()
+#     We check here if the rank is sending to or
+#     receiving from a different hardware backend (e.g., CUDA → ROCm).
+#     When true, communication should use CPU Backend.
+#     """
+#     # check if heterogeneous mode is enabled
+#     if not is_heterogeneous_mode():
+#         return False
+#     # double check
+#     assert _HETERO_CONFIG is not None
 
-    # TODO (hetarth): ideally we need to check the backend of the
-    # next and previous stage
-    # Check if stage backends are available for explicit backend comparison
-    try:
-        # naively assume cross-backend edge when TP sizes differ
-        next_tp = get_next_stage_tp_size()
-        prev_tp = get_prev_stage_tp_size()
-        # current_tp = info['tp_size']
+#     # Get current stage info
+#     info = get_current_stage_info()
 
-        stage_backends = get_or_detect_stage_backends()
-        current_stage = info['stage']
-        current_backend = stage_backends.get(current_stage)
+#     # TODO (hetarth): ideally we need to check the backend of the
+#     # next and previous stage
+#     # Check if stage backends are available for explicit backend comparison
+#     try:
+#         # naively assume cross-backend edge when TP sizes differ
+#         next_tp = get_next_stage_tp_size()
+#         prev_tp = get_prev_stage_tp_size()
+#         # current_tp = info['tp_size']
 
-        if next_tp is not None:
-            # Check next stage backend
-            next_stage = current_stage + 1
-            if next_stage in stage_backends:
-                next_backend = stage_backends[next_stage]
-                if current_backend != next_backend:
-                    return True
+#         stage_backends = get_or_detect_stage_backends()
+#         current_stage = info['stage']
+#         current_backend = stage_backends.get(current_stage)
 
-        if prev_tp is not None:
-            # Check previous stage backend
-            prev_stage = current_stage - 1
-            if prev_stage in stage_backends:
-                prev_backend = stage_backends[prev_stage]
-                if current_backend != prev_backend:
-                    return True
-    except Exception:
-        pass
+#         if next_tp is not None:
+#             # Check next stage backend
+#             next_stage = current_stage + 1
+#             if next_stage in stage_backends:
+#                 next_backend = stage_backends[next_stage]
+#                 if current_backend != next_backend:
+#                     return True
 
-    # if next_tp is not None and next_tp != current_tp:
-    #     return True
-    # if prev_tp is not None and prev_tp != current_tp:
-    #     return True
+#         if prev_tp is not None:
+#             # Check previous stage backend
+#             prev_stage = current_stage - 1
+#             if prev_stage in stage_backends:
+#                 prev_backend = stage_backends[prev_stage]
+#                 if current_backend != prev_backend:
+#                     return True
+#     except Exception:
+#         pass
 
-    return False
+#     # if next_tp is not None and next_tp != current_tp:
+#     #     return True
+#     # if prev_tp is not None and prev_tp != current_tp:
+#     #     return True
 
+#     return False
 
-def should_use_cpu_hop() -> bool:
-    """Determine if CPU hop should be used for current PP communication.
-    
-    CPU hop is required when:
-    1. Crossing backend boundaries (CUDA ↔ ROCm ↔ TPU)
-    2. Different TP sizes between stages (gather/broadcast required)
-    
-    Returns:
-        True if CPU hop should be used, False if direct device-to-device is OK.
-    """
-    if not is_heterogeneous_mode():
-        return False
+# def should_use_cpu_hop() -> bool:
+#     """Determine if CPU hop should be used for current PP communication.
 
-    # Always use CPU hop for cross-backend edges
-    return bool(is_cross_backend_edge())
-
-
-# def get_stage_backend_info() -> Optional[dict]:
-#     """Get backend information for all stages.
+#     CPU hop is required when:
+#     1. Crossing backend boundaries (CUDA ↔ ROCm ↔ TPU)
+#     2. Different TP sizes between stages (gather/broadcast required)
 
 #     Returns:
-#         Dictionary mapping stage index to backend type,
-#        or None if not available.
-#         Example: {0: 'cuda', 1: 'rocm', 2: 'cuda', 3: 'tpu'}
+#         True if CPU hop should be used, False if direct device-to-device is OK
 #     """
 #     if not is_heterogeneous_mode():
-#         return None
+#         return False
 
-#     assert _HETERO_CONFIG is not None
-#     return _HETERO_CONFIG.get('stage_backends')
+#     # Always use CPU hop for cross-backend edges
+#     return bool(is_cross_backend_edge())
 
 
-def get_or_detect_stage_backends() -> dict[int, str]:
-    """Get stage backend info, auto-detecting if not already set.
+def get_stage_backends() -> dict[int, str]:
+    """Get stage backend info.
     
     Returns:
         Dictionary mapping stage index to backend type
         
-    This is a convenience function that:
-    1. Returns existing stage_backends if already set
-    2. Auto-detects and sets them if not present
+    This is a convenience function that returns 
+    existing stage_backends if already set
     """
     if not is_heterogeneous_mode():
         raise ValueError("Heterogeneous mode must be enabled")
@@ -415,8 +398,8 @@ def get_or_detect_stage_backends() -> dict[int, str]:
     # Check if already populated
     if 'stage_backends' in _HETERO_CONFIG and _HETERO_CONFIG['stage_backends']:
         return _HETERO_CONFIG['stage_backends']
-
-    return auto_detect_stage_backends()
+    else:
+        raise ValueError("Dict of stage backends were not set")
 
 
 def auto_detect_stage_backends() -> dict:
