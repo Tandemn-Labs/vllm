@@ -689,7 +689,7 @@ class GroupCoordinator:
         stage_info = get_current_stage_info()
         stage_backends = get_stage_backends()
         pp_rank = stage_info["pp_rank"]
-        cross_backend = stage_backends[pp_rank] == stage_backends[pp_rank + 1]
+        cross_backend = stage_backends[pp_rank] != stage_backends[pp_rank + 1]
 
         group = self.device_group
         metadata_group = self.cpu_group
@@ -747,7 +747,7 @@ class GroupCoordinator:
         stage_backends = get_stage_backends()
         pp_rank = stage_info["pp_rank"]
         tp_rank = stage_info["tp_rank"]
-        cross_backend = stage_backends[pp_rank] == stage_backends[pp_rank - 1]
+        cross_backend = stage_backends[pp_rank] != stage_backends[pp_rank - 1]
         tp_group = get_tp_group()
 
         group = self.device_group
