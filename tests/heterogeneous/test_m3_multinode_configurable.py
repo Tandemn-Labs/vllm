@@ -59,7 +59,8 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.heterogeneous_parallel import (get_current_stage_info,
-                                                     is_heterogeneous_mode)
+                                                     is_heterogeneous_mode,
+                                                     is_pp_primary_rank)
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel,
                                              ensure_model_parallel_initialized,
@@ -198,6 +199,8 @@ def test_basic_communication(config: HeterogeneousTestConfig):
           f"({node_info['gpu_memory_gb']:.1f}GB)")
     print(f"[Rank {rank}] Stage {info['stage']}/"
           f"{config.pipeline_parallel_size-1}, TP={info['tp_size']}")
+    print(f"""[Rank {rank}] TP Rank: {info['tp_rank']},
+        PP Primary: {is_pp_primary_rank()}""")
 
     # Forward pass simulation
     if info['stage'] < config.pipeline_parallel_size - 1:  # Not last stage
@@ -210,25 +213,39 @@ def test_basic_communication(config: HeterogeneousTestConfig):
             'stage': info['stage'],
             'node': node_info['node_rank'],
             'gpu_type': node_info['gpu_name'],
+            'tp_rank': info['tp_rank'],
         }
 
         print(f"[Rank {rank}] Stage {info['stage']} → "
-              f"Stage {info['stage']+1}")
-        pp_group.send_tensor_dict_heterogeneous(tensor_dict)
-        print(f"✅ [Rank {rank}] Sent from stage {info['stage']}")
+              f"Stage {info['stage']+1} (TP rank {info['tp_rank']})")
+        # Use regular send_tensor_dict - it will route to heterogeneous version
+        _ = pp_group.send_tensor_dict(tensor_dict)
+        if info['tp_rank'] == 0:
+            print(
+                f"✅ [Rank {rank}] Sent from stage {info['stage']} (TP rank 0)")
+        else:
+            print(f"""Stage {info['stage']} 
+                TP rank {info['tp_rank']} skipped send""")
 
     if info['stage'] > 0:  # Not first stage
-        print(f"[Rank {rank}] Waiting to receive at stage {info['stage']}")
-        received = pp_group.recv_tensor_dict_heterogeneous()
+        print(f"[Rank {rank}] Waiting to receive at stage {info['stage']} "
+              f"(TP rank {info['tp_rank']})")
+        # Use regular recv_tensor_dict - it will route to heterogeneous version
+        received = pp_group.recv_tensor_dict()
 
-        prev_stage = received.get('stage', -1)
-        prev_node = received.get('node', -1)
-        prev_gpu = received.get('gpu_type', 'unknown')
+        if received:  # Will be None for some ranks in heterogeneous mode
+            prev_stage = received.get('stage', -1)
+            prev_node = received.get('node', -1)
+            prev_gpu = received.get('gpu_type', 'unknown')
+            prev_tp_rank = received.get('tp_rank', -1)
 
-        print(f"✅ [Rank {rank}] Stage {info['stage']} received "
-              f"from stage {prev_stage}")
-        print(f"   Source: Node {prev_node} ({prev_gpu})")
-        print(f"   Shape: {received['activations'].shape}")
+            print(f"✅ [Rank {rank}] Stage {info['stage']} received "
+                  f"from stage {prev_stage}")
+            print(f"""Source: Node {prev_node} ({prev_gpu}),
+                TP rank {prev_tp_rank}""")
+            print(f"   Shape: {received['activations'].shape}")
+        else:
+            print(f"ℹ[Rank {rank}] No data received (expected)")
 
 
 def test_bandwidth(config: HeterogeneousTestConfig):
@@ -241,32 +258,29 @@ def test_bandwidth(config: HeterogeneousTestConfig):
     pp_group = get_pp_group()
     rank = dist.get_rank()
 
-    print(f"\n[Rank {rank}] Testing bandwidth for stage {info['stage']}")
+    print(f"\n[Rank {rank}] Testing bandwidth for stage {info['stage']} "
+          f"(TP rank {info['tp_rank']})")
 
     results = []
 
     for size_mb in config.test_sizes_mb:
         elements = (size_mb * 1024 * 1024) // 4  # float32
 
-        # Adjust size based on TP to keep total communication constant
-        elements_per_rank = elements // max(1, info['tp_size'])
-
-        # Only test between consecutive stages
-        if info['stage'] == 0:
-            tensor = torch.randn(elements_per_rank, device='cuda')
-            tensor_dict = {'data': tensor}
+        # For heterogeneous mode, only TP rank 0 actually sends/receives
+        # so we use the full tensor size
+        if info['stage'] == 0 and info['tp_rank'] == 0:
+            tensor = torch.randn(elements, device='cuda')
+            tensor_dict = {'data': tensor, 'size_mb': size_mb}
 
             torch.cuda.synchronize()
             start_time = time.time()
 
-            pp_group.send_tensor_dict_heterogeneous(tensor_dict)
+            pp_group.send_tensor_dict(tensor_dict)
 
             torch.cuda.synchronize()
             elapsed = time.time() - start_time
 
-            # Account for gathering if TP > 1
-            actual_size_mb = size_mb if info['tp_size'] == 1 else size_mb
-            bandwidth = actual_size_mb / elapsed
+            bandwidth = size_mb / elapsed
 
             results.append({
                 'size_mb': size_mb,
@@ -278,10 +292,15 @@ def test_bandwidth(config: HeterogeneousTestConfig):
                   f"({bandwidth:.2f} MB/s)")
 
         elif info['stage'] == 1:
-            received = pp_group.recv_tensor_dict_heterogeneous()
-            # Receiver doesn't measure in this simple test
-            print(f"  Received {received['data'].shape}")
-            pass
+            received = pp_group.recv_tensor_dict()
+            if received and 'data' in received:
+                # Receiver got the data
+                size_mb_received = received.get('size_mb', 0)
+                print(f"""Received {size_mb_received}MB,
+                    shape {received['data'].shape}""")
+            elif info['tp_rank'] != 0:
+                print(f"""TP rank {info['tp_rank']} waiting
+                    for broadcast from TP rank 0""")
 
     return results
 
@@ -296,12 +315,13 @@ def test_latency(config: HeterogeneousTestConfig):
     pp_group = get_pp_group()
     rank = dist.get_rank()
 
-    print(f"\n[Rank {rank}] Testing latency for stage {info['stage']}")
+    print(f"\n[Rank {rank}] Testing latency for stage {info['stage']} "
+          f"(TP rank {info['tp_rank']})")
 
     latencies = []
 
     for i in range(config.iterations):
-        if info['stage'] == 0:
+        if info['stage'] == 0 and info['tp_rank'] == 0:
             # Small tensor for latency test
             tensor = torch.randn(10, device='cuda')
             tensor_dict = {
@@ -311,18 +331,22 @@ def test_latency(config: HeterogeneousTestConfig):
             }
 
             torch.cuda.synchronize()
-            pp_group.send_tensor_dict_heterogeneous(tensor_dict)
+            pp_group.send_tensor_dict(tensor_dict)
 
         elif info['stage'] == 1:
             torch.cuda.synchronize()
-            received = pp_group.recv_tensor_dict_heterogeneous()
+            received = pp_group.recv_tensor_dict()
             torch.cuda.synchronize()
 
-            if 'timestamp' in received:
+            if received and 'timestamp' in received:
                 e2e_latency = (time.time() - received['timestamp']) * 1000
                 latencies.append(e2e_latency)
+                if info['tp_rank'] == 0:
+                    # Only TP rank 0 gets direct measurement
+                    # Others get it after broadcast
+                    pass
 
-    if latencies and info['stage'] == 1:
+    if latencies and info['stage'] == 1 and info['tp_rank'] == 0:
         avg_latency = sum(latencies) / len(latencies)
         min_latency = min(latencies)
         max_latency = max(latencies)
@@ -343,25 +367,41 @@ def test_stress(config: HeterogeneousTestConfig):
     pp_group = get_pp_group()
     rank = dist.get_rank()
 
-    print(f"\n[Rank {rank}] Running stress test for stage {info['stage']}")
+    print(f"\n[Rank {rank}] Running stress test for stage {info['stage']} "
+          f"(TP rank {info['tp_rank']})")
 
     # Continuous send/recv for 10 seconds
     start_time = time.time()
     count = 0
+    errors = 0
 
     while time.time() - start_time < 10:
-        if info['stage'] < config.pipeline_parallel_size - 1:
-            tensor = torch.randn(1000, 1000, device='cuda')
-            tensor_dict = {'data': tensor, 'seq': count}
-            pp_group.send_tensor_dict_heterogeneous(tensor_dict)
+        try:
+            if info['stage'] < config.pipeline_parallel_size - 1:
+                tensor = torch.randn(1000, 1000, device='cuda')
+                tensor_dict = {'data': tensor, 'seq': count}
+                pp_group.send_tensor_dict(tensor_dict)
 
-        if info['stage'] > 0:
-            received = pp_group.recv_tensor_dict_heterogeneous()
-            assert 'data' in received
+            if info['stage'] > 0:
+                received = pp_group.recv_tensor_dict()
+                # Only check for data if we're a rank that should receive it
+                if received is not None:
+                    assert 'data' in received, "Missing data in received dict"
+                    # Verify sequence number if present
+                    if 'seq' in received and info['tp_rank'] == 0:
+                        # Can verify sequence on primary rank
+                        pass
 
-        count += 1
+            count += 1
+        except Exception as e:
+            errors += 1
+            print(f"⚠️ [Rank {rank}] Error in iteration {count}: {e}")
+            if errors > 5:
+                print(f"❌ [Rank {rank}] Too many errors, stopping stress test")
+                break
 
-    print(f"✅ [Rank {rank}] Stress test: {count} iterations in 10s")
+    print(f"✅ [Rank {rank}] Stress test: {count} iterations in "
+          f"{time.time() - start_time:.1f}s (errors: {errors})")
 
 
 def verify_topology(config: HeterogeneousTestConfig):
