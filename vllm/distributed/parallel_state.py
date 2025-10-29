@@ -293,11 +293,25 @@ class GroupCoordinator:
     @property
     def is_first_rank(self):
         """Return whether the caller is the first process in the group"""
-        return self.rank == self.first_rank
+        from vllm.distributed.heterogeneous_parallel import (
+            get_current_stage_info, is_heterogeneous_mode)
+        if is_heterogeneous_mode():
+            return get_current_stage_info()['pp_rank'] == 0
+        else:
+            return self.rank == self.first_rank
 
     @property
     def is_last_rank(self):
         """Return whether the caller is the last process in the group"""
+        from vllm.distributed.heterogeneous_parallel import (
+            get_current_stage_info, get_heterogeneous_config,
+            is_heterogeneous_mode)
+        if is_heterogeneous_mode():
+            hetero_config = get_heterogeneous_config()
+            if hetero_config:
+                stage_info = get_current_stage_info()
+                lastStage = hetero_config['pipeline_parallel_size'] - 1
+                return stage_info['pp_rank'] == lastStage
         return self.rank == self.last_rank
 
     @property

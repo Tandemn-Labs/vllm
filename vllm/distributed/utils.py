@@ -101,6 +101,16 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
     because they contain the input and output embeddings respectively and we
     are attempting to reduce maximum memory consumption across partitions.
     """
+    from vllm.distributed.heterogeneous_parallel import (
+        get_current_stage_info, get_heterogeneous_config,
+        is_heterogeneous_mode)
+    if is_heterogeneous_mode():
+        hetero_config = get_heterogeneous_config()
+        if hetero_config is not None:
+            stage_info = get_current_stage_info()
+            pp_rank = stage_info['pp_rank']
+            pp_size = hetero_config['pipeline_parallel_size']
+
     partition_list_str = envs.VLLM_PP_LAYER_PARTITION
     if partition_list_str is not None:
         try:
