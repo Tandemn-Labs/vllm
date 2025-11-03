@@ -318,6 +318,7 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    per_stage_tp_sizes: Optional[list[int]] = ParallelConfig.per_stage_tp_sizes
     decode_context_parallel_size: int = \
         ParallelConfig.decode_context_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -654,6 +655,13 @@ class EngineArgs:
             **parallel_kwargs["pipeline_parallel_size"])
         parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
+        parallel_group.add_argument(
+            "--per-stage-tp-sizes",
+            default=None,
+            required=False,
+            help="Comma-separated list of TP sizes for each PP stage. "
+            "Example: 4,1,2,1 for 4 stages with TP=4,1,2,1 respectively. "
+            "Enables heterogeneous TP+PP configurations.")
         parallel_group.add_argument(
             "--decode-context-parallel-size", "-dcp",
             **parallel_kwargs["decode_context_parallel_size"])
