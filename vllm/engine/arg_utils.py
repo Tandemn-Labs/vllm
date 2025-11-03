@@ -657,6 +657,7 @@ class EngineArgs:
                                     **parallel_kwargs["tensor_parallel_size"])
         parallel_group.add_argument(
             "--per-stage-tp-sizes",
+            type=lambda s: [int(x) for x in s.split(',')],
             default=None,
             required=False,
             help="Comma-separated list of TP sizes for each PP stage. "
