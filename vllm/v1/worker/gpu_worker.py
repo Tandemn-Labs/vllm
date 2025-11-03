@@ -702,9 +702,20 @@ def init_worker_distributed_environment(
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank, backend)
 
-    ensure_model_parallel_initialized(
-        parallel_config.tensor_parallel_size,
-        parallel_config.pipeline_parallel_size,
-        parallel_config.decode_context_parallel_size)
+    if parallel_config.per_stage_tp_sizes is not None:
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=parallel_config.tensor_parallel_size,
+            pipeline_model_parallel_size=parallel_config.
+            pipeline_parallel_size,
+            decode_context_model_parallel_size=parallel_config.
+            decode_context_parallel_size,
+            per_stage_tp_sizes=parallel_config.per_stage_tp_sizes)
+    else:
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=parallel_config.tensor_parallel_size,
+            pipeline_model_parallel_size=parallel_config.
+            pipeline_parallel_size,
+            decode_context_model_parallel_size=parallel_config.
+            decode_context_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
